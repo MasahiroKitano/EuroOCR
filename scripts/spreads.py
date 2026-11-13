@@ -33,13 +33,39 @@ def is_spread(page):
     return w >= h * WIDE_RATIO
 
 
-def make_half(dst, page, x_from, x_to, y0, y1):
-    """page を複製し、横方向 x_from〜x_to の範囲だけを表示するページにする。
-    座標の原点を (0,0) に合わせ直す（OCRソフトで位置がずれないように）"""
+IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+
+def display_transform(page):
+    """ページの座標を「見た目どおりの向き」の座標（左下が原点）に移す変換と、見た目の幅・高さ。
+    回転指定（/Rotate、時計回り）を反映する。戻り値: ((a, b, c, d, e, f), 幅, 高さ)
+    変換は X = a*x + c*y + e, Y = b*x + d*y + f"""
+    x0, y0, x1, y1 = box_of(page)
+    w, h = x1 - x0, y1 - y0
+    rot = int(page.obj.get(Name.Rotate, 0)) % 360
+    if rot == 90:
+        return (0.0, -1.0, 1.0, 0.0, -y0, w + x0), h, w
+    if rot == 180:
+        return (-1.0, 0.0, 0.0, -1.0, x0 + w, y0 + h), w, h
+    if rot == 270:
+        return (0.0, 1.0, -1.0, 0.0, y0 + h, -x0), h, w
+    return (1.0, 0.0, 0.0, 1.0, -x0, -y0), w, h
+
+
+def apply(m, x, y):
+    a, b, c, d, e, f = m
+    return a * x + c * y + e, b * x + d * y + f
+
+
+def make_half(dst, page, x_from, x_to):
+    """page を複製し、見た目どおりの向きで横方向 x_from〜x_to（ポイント）の範囲だけを
+    表示するページにする。回転指定は内容の向きに組み込んで取り除き、座標の原点を (0,0)
+    に合わせ直す（OCRソフトや切り直しで位置がずれないように）。内容そのものは書き換えない"""
+    m, _, hd = display_transform(page)
     dst.pages.append(page)
     new = dst.pages[-1]
     # 同じページを2回複製すると内容の指定が共有されることがあるので、
-    # 元ページの内容から組み立て直す（内容そのものは書き換えない）
+    # 元ページの内容から組み立て直す
     orig = page.obj.get(Name.Contents)
     if orig is None:
         parts = []
@@ -47,20 +73,24 @@ def make_half(dst, page, x_from, x_to, y0, y1):
         parts = [dst.copy_foreign(s) for s in orig]
     else:
         parts = [dst.copy_foreign(orig)]
-    cm = dst.make_indirect(
-        pikepdf.Stream(dst, f"1 0 0 1 {-x_from:.4f} {-y0:.4f} cm\n".encode()))
+    a, b, c, d, e, f = m
+    cm = dst.make_indirect(pikepdf.Stream(
+        dst, f"{a:g} {b:g} {c:g} {d:g} {e - x_from:.4f} {f:.4f} cm\n".encode()))
     new.obj.Contents = Array([cm, *parts])
-    w, h = x_to - x_from, y1 - y0
-    new.obj.MediaBox = Array([0, 0, w, h])
-    for key in (Name.CropBox, Name.BleedBox, Name.TrimBox, Name.ArtBox):
+    new.obj.MediaBox = Array([0, 0, x_to - x_from, hd])
+    for key in (Name.CropBox, Name.BleedBox, Name.TrimBox, Name.ArtBox, Name.Rotate):
         if key in new.obj:
             del new.obj[key]
     return new
 
 
-def split_annots(halves, dst):
-    """複製したページの注釈を、中心の位置で左右のページに振り分けて座標を直す。
-    外観（AP）は Rect に合わせて描かれるので、Rect を動かすだけで正しい位置に出る"""
+def split_annots(halves, dst, m=IDENTITY):
+    """複製したページの注釈を、見た目の横位置で左右のページに振り分けて座標を直す。
+    halves: [{"page", "x_from", "x_to"}, ...]（見た目どおりの向きの座標）
+    m: 元のページの座標を見た目の座標に移す変換（display_transform の値）。
+    回転のないときは外観（AP）をそのまま使い、回転を取り除いたときは外観を外して
+    表示するアプリに描き直させる"""
+    rotated = (m[1], m[2]) != (0.0, 0.0) or m[0] < 0
     orig = []
     for h in halves:
         if Name.Annots in h["page"].obj:
@@ -72,24 +102,33 @@ def split_annots(halves, dst):
         if Name.Rect not in a or a.get(Name.Subtype) == Name.Popup:
             continue
         r = [float(v) for v in a.Rect]
-        cx = (r[0] + r[2]) / 2
+        corners = [apply(m, x, y) for x, y in ((r[0], r[1]), (r[2], r[3]))]
+        cx = (corners[0][0] + corners[1][0]) / 2
         target = next((h for h in halves if h["x_from"] <= cx < h["x_to"]), halves[-1])
         na = dst.make_indirect(pikepdf.Dictionary(a))
-        dx, dy = target["x_from"], target["y0"]
+        dx = target["x_from"]
 
-        def shift(arr, step):
+        def move(arr):
             vals = [float(v) for v in arr]
-            return Array([v - (dx if i % step == 0 else dy) for i, v in enumerate(vals)])
+            out = []
+            for i in range(0, len(vals) - 1, 2):
+                X, Y = apply(m, vals[i], vals[i + 1])
+                out += [X - dx, Y]
+            return Array(out)
 
-        na.Rect = shift(a.Rect, 2)
+        xs = [cx_ - dx for cx_, _ in corners]
+        ys = [cy_ for _, cy_ in corners]
+        na.Rect = Array([min(xs), min(ys), max(xs), max(ys)])
         for key in (Name.QuadPoints, Name.Vertices, Name.L):
             if key in na:
-                na[key] = shift(na[key], 2)
+                na[key] = move(na[key])
         if Name.InkList in na:
-            na.InkList = Array([shift(s, 2) for s in na.InkList])
+            na.InkList = Array([move(s) for s in na.InkList])
         for key in (Name.Popup, Name.P):
             if key in na:
                 del na[key]
+        if rotated and Name.AP in na:
+            del na[Name.AP]
         na.P = target["page"].obj
         if Name.Annots not in target["page"].obj:
             target["page"].obj.Annots = Array()
@@ -216,24 +255,19 @@ def split_pdf(src, dst_path, rtl, gutter, keep_first, keep_last, auto_gutter=Fal
                                f"gutter adjusted on {len(moved)} spread(s) ({shown})"))
         for i, page in enumerate(pdf.pages):
             keep = i < keep_first or i >= n - keep_last
-            rot = int(page.obj.get(Name.Rotate, 0)) % 360
             if keep or not is_spread(page):
                 out.pages.append(page)
                 continue
-            if rot != 0:
-                notes.append(T(f"{i+1}ページ目は回転指定（{rot}度）があるため分割せず", f"page {i+1} has rotation {rot}; not split"))
-                out.pages.append(page)
-                continue
-            x0, y0, x1, y1 = box_of(page)
-            mid = x0 + (x1 - x0) * gutters.get(i, gutter)
-            parts = [(x0, mid), (mid, x1)]
+            m, wd, _ = display_transform(page)
+            mid = wd * gutters.get(i, gutter)
+            parts = [(0.0, mid), (mid, wd)]
             if rtl:
                 parts.reverse()
             halves = []
             for xf, xt in parts:
-                np_ = make_half(out, page, xf, xt, y0, y1)
-                halves.append({"page": np_, "x_from": xf, "x_to": xt, "y0": y0})
-            split_annots(sorted(halves, key=lambda h: h["x_from"]), out)
+                np_ = make_half(out, page, xf, xt)
+                halves.append({"page": np_, "x_from": xf, "x_to": xt})
+            split_annots(sorted(halves, key=lambda h: h["x_from"]), out, m)
             split_count += 1
         if split_count:
             out.save(dst_path)

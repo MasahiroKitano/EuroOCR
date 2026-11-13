@@ -126,10 +126,9 @@ def seam_offset(src, n, dpi=150):
     return best_s * 72 / dpi             # 右の行 y+s が左の行 y に当たる → 右を上へ s
 
 
-def rejoin_and_cut(src, dst, n, cut_x, dy=0.0):
-    """n ページ目と次のページを横に並べて1枚にし、左端から cut_x（ポイント）の位置で
-    切り直して2ページに戻したものを dst に保存する。画像は切らない（表示範囲だけ）"""
-    pdf = pikepdf.open(src)
+def rejoin_in(pdf, n, cut_x, dy=0.0):
+    """開いている pdf の n ページ目と次のページを横に並べて1枚にし、左端から cut_x
+    （ポイント）の位置で切り直して2ページに戻す。画像は切らない（表示範囲だけ）"""
     left, right = pdf.pages[n], pdf.pages[n + 1]
     lx0, ly0, lx1, ly1 = page_box(left)
     rx0, ry0, rx1, ry1 = page_box(right)
@@ -161,7 +160,7 @@ def rejoin_and_cut(src, dst, n, cut_x, dy=0.0):
         if len(annots):
             page_dict.Annots = Array(list(annots))
         halves.append({"page": pikepdf.Page(pdf.make_indirect(page_dict)),
-                       "x_from": x_from, "x_to": x_to, "y0": 0.0})
+                       "x_from": x_from, "x_to": x_to})
     sp.split_annots(halves, pdf)
 
     # 元の2ページを新しい2ページに置き換える
@@ -169,8 +168,13 @@ def rejoin_and_cut(src, dst, n, cut_x, dy=0.0):
     del pdf.pages[n]
     pdf.pages.insert(n, halves[0]["page"])
     pdf.pages.insert(n + 1, halves[1]["page"])
-    pdf.save(dst)
-    pdf.close()
+
+
+def rejoin_and_cut(src, dst, n, cut_x, dy=0.0):
+    """rejoin_in をファイルに対して行い、dst に保存する"""
+    with pikepdf.open(src) as pdf:
+        rejoin_in(pdf, n, cut_x, dy)
+        pdf.save(dst)
 
 
 def bilevel_pages(pdf_path, idxs):
@@ -215,42 +219,6 @@ def backup(src):
     for p in old[:-BACKUP_KEEP]:
         p.unlink(missing_ok=True)
     return dst
-
-
-def resplit(src, n, cut_x, langs, jobs="4", progress=print, dy=0.0):
-    """n ページ目（0始まり）と次のページを cut_x で切り直し、2ページを読み直して上書きする"""
-    src = Path(src)
-    lang = "+".join(langs)
-    tmp = Path(tempfile.mkdtemp(prefix="eurocr_resplit_"))
-    try:
-        was_bilevel = bilevel_pages(src, [n, n + 1])
-        progress(T("切り直しています…", "Re-splitting…"))
-        cut = tmp / "cut.pdf"
-        rejoin_and_cut(src, cut, n, cut_x, dy)
-        clean = tmp / "clean.pdf"
-        c.strip_annots(cut, clean)                 # 注釈は最後に移植する
-        data = c.choose_tessdata(langs)
-        progress(T(f"{n + 1}〜{n + 2}ページを読み直しています（{lang}・{data}）…",
-                   f"Re-reading pages {n + 1}–{n + 2} ({lang}, {data})…"))
-        ocr = tmp / "ocr.pdf"
-        c.ocrmypdf("--mode", "force", "--pages", f"{n + 1}-{n + 2}", "--output-type", "pdf",
-                   "-l", lang, "--jobs", jobs, clean, ocr)
-        current = ocr
-        if was_bilevel:
-            bw = tmp / "bw.pdf"
-            if binarize_pages(ocr, bw, [n, n + 1]) > 0:
-                current = bw
-        final = tmp / "final.pdf"
-        c.copy_annots(cut, current, final)
-        bk = backup(src)
-        shutil.move(str(final), str(src))
-        c.LOG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(LOG_PATH, "a", encoding="utf-8") as log:
-            log.write(f"{datetime.datetime.now():%Y-%m-%d %H:%M} RESPLIT {src} | pages {n + 1}-{n + 2} | "
-                      f"cut {cut_x:.1f}pt | {lang} | backup {bk}\n")
-        return bk
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def guess_langs(src, n):
@@ -327,7 +295,7 @@ def build_map(orig, ocr_npages):
     再現できなければ None"""
     with pikepdf.open(orig) as pdf:
         n = len(pdf.pages)
-        wide = [sp.is_spread(p) and int(p.obj.get(Name.Rotate, 0)) % 360 == 0 for p in pdf.pages]
+        wide = [sp.is_spread(p) for p in pdf.pages]
     split = n > 0 and sum(1 for p in wide if p) >= n * SPREAD_SHARE
     mapping = []
     for k in range(n):
@@ -356,14 +324,12 @@ def spread_pair(mapping, n):
     return k, left, right
 
 
-def recut_from_original(src, orig, dst, k, left, right, cut_x):
-    """元のファイルの k ページ目（見開き）を cut_x で切った2ページで、OCR済みファイルの
-    left・right ページを置き換えて dst に保存する。注釈は位置に応じて振り分け直す"""
-    pdf = pikepdf.open(src)
-    o = pikepdf.open(orig)
+def recut_in(pdf, o, k, left, right, cut_x):
+    """開いている元のファイル o の k ページ目（見開き）を cut_x で切った2ページで、
+    開いている OCR済みファイル pdf の left・right ページを置き換える。注釈は振り分け直す"""
     spread = o.pages[k]
-    x0, y0, x1, y1 = sp.box_of(spread)
-    if not (0 < cut_x < x1 - x0):
+    _, spread_w, _ = sp.display_transform(spread)       # 回転指定を反映した見た目の幅
+    if not (0 < cut_x < spread_w):
         raise ValueError(T("切る位置が範囲の外です", "cut position out of range"))
     # 今の注釈を見開きの座標で集める（右ページは今の切れ目の分だけ右へ）
     old_cut = page_box(pdf.pages[left])[2] - page_box(pdf.pages[left])[0]
@@ -376,53 +342,85 @@ def recut_from_original(src, orig, dst, k, left, right, cut_x):
                 annots.append(shift_annot(a, dx - bx0, -by0, pdf))
     # 元の見開きを新しい位置で切った2ページを作る
     tmp = pikepdf.new()
-    sp.make_half(tmp, spread, x0, x0 + cut_x, y0, y1)
-    sp.make_half(tmp, spread, x0 + cut_x, x1, y0, y1)
+    sp.make_half(tmp, spread, 0.0, cut_x)
+    sp.make_half(tmp, spread, cut_x, spread_w)
     for p in tmp.pages:
         if Name.Annots in p.obj:
             del p.obj[Name.Annots]
     pdf.pages[left] = tmp.pages[0]
     pdf.pages[right] = tmp.pages[1]
-    halves = [{"page": pdf.pages[left], "x_from": 0.0, "x_to": cut_x, "y0": 0.0},
-              {"page": pdf.pages[right], "x_from": cut_x, "x_to": x1 - x0, "y0": 0.0}]
+    halves = [{"page": pdf.pages[left], "x_from": 0.0, "x_to": cut_x},
+              {"page": pdf.pages[right], "x_from": cut_x, "x_to": spread_w}]
     if annots:
         for h in halves:
             h["page"].obj.Annots = Array(annots)
         sp.split_annots(halves, pdf)
-    pdf.save(dst)
-    pdf.close()
-    o.close()
 
 
-def resplit_original(src, orig, k, left, right, cut_x, langs, jobs="4", progress=print,
-                     despeckle_area=6):
-    """元の見開きから切り直し、その2ページをノイズ除去・傾き補正・OCRし直して上書きする"""
+def recut_from_original(src, orig, dst, k, left, right, cut_x):
+    """recut_in をファイルに対して行い、dst に保存する"""
+    with pikepdf.open(src) as pdf, pikepdf.open(orig) as o:
+        recut_in(pdf, o, k, left, right, cut_x)
+        pdf.save(dst)
+
+
+def page_spec(pairs):
+    """[(left, right), ...]（0始まり）→ OCRmyPDF の --pages の指定（1始まり）"""
+    return ",".join(f"{l + 1}-{r + 1}" for l, r in sorted(pairs))
+
+
+def resplit_many(src, edits, orig=None, jobs="4", progress=print, despeckle_area=6):
+    """切り直しの予定 edits をまとめて行い、上書き保存する。戻り値: バックアップの場所
+    edits: [{"left", "right", "cut_x", "langs", "k"(元のファイルの見開き), "dy"(くっつけるとき)}]
+    orig があれば元のスキャンから切り直し（新しいページにノイズ除去・傾き補正・OCR）、
+    なければ OCR済みの2ページをくっつけて切り直す（2ページを作り直して OCR）"""
     src = Path(src)
-    lang = "+".join(langs)
-    pages = f"{left + 1}-{right + 1}"
+    edits = sorted(edits, key=lambda e: e["left"])
     tmp = Path(tempfile.mkdtemp(prefix="eurocr_resplit_"))
     try:
-        progress(T("元の見開きから切り直しています…", "Re-cutting from the original spread…"))
+        progress(T(f"{len(edits)}か所を切り直しています…", f"Re-cutting {len(edits)} spread(s)…"))
         cut = tmp / "cut.pdf"
-        recut_from_original(src, orig, cut, k, left, right, cut_x)
-        was_bilevel = bilevel_pages(cut, [left, right])
+        with pikepdf.open(src) as pdf:
+            if orig is not None:
+                with pikepdf.open(orig) as o:
+                    for e in edits:
+                        recut_in(pdf, o, e["k"], e["left"], e["right"], e["cut_x"])
+                    pdf.save(cut)
+            else:
+                for e in edits:
+                    rejoin_in(pdf, e["left"], e["cut_x"], e.get("dy", 0.0))
+                pdf.save(cut)
+        bilevel = [(e["left"], e["right"]) for e in edits
+                   if bilevel_pages(cut, [e["left"], e["right"]])]
+        bilevel_idx = [i for pair in bilevel for i in pair]
         clean = tmp / "clean.pdf"
         c.strip_annots(cut, clean)                 # 注釈は最後に移植する
-        source = clean
-        if was_bilevel:
-            c.despeckle_pdf(clean, tmp / "despeckled.pdf", despeckle_area, pages=[left, right])
-            source = tmp / "despeckled.pdf"
-        data = c.choose_tessdata(langs)
-        progress(T(f"{left + 1}〜{right + 1}ページを傾き補正して読み直しています（{lang}・{data}）…",
-                   f"Deskewing and re-reading pages {left + 1}–{right + 1} ({lang}, {data})…"))
-        ocr = tmp / "ocr.pdf"
-        # 文字のない2ページ（新しく切ったページ）だけが処理される
-        c.ocrmypdf("--mode", "skip", "--deskew", "--pages", pages, "--output-type", "pdf",
-                   "-l", lang, "--jobs", jobs, source, ocr)
-        current = ocr
-        if was_bilevel:
+        current = clean
+        if orig is not None and bilevel_idx:
+            c.despeckle_pdf(clean, tmp / "despeckled.pdf", despeckle_area, pages=bilevel_idx)
+            current = tmp / "despeckled.pdf"
+        # 同じ言語の予定はまとめて1回の OCR で読む
+        groups = {}
+        for e in edits:
+            groups.setdefault(tuple(e["langs"]), []).append((e["left"], e["right"]))
+        for g, (langs, pairs) in enumerate(groups.items(), 1):
+            lang = "+".join(langs)
+            data = c.choose_tessdata(list(langs))
+            spec = page_spec(pairs)
+            progress(T(f"読み直しています（{g}/{len(groups)}）：{spec} ページ・{lang}・{data}…",
+                       f"Re-reading ({g}/{len(groups)}): pages {spec}, {lang}, {data}…"))
+            out = tmp / f"ocr{g}.pdf"
+            if orig is not None:
+                # 新しく切ったページ（文字がない）だけが読まれ、傾き補正もかかる
+                mode = ["--mode", "skip", "--deskew"]
+            else:
+                mode = ["--mode", "force"]
+            c.ocrmypdf(*mode, "--pages", spec, "--output-type", "pdf", "-l", lang,
+                       "--jobs", jobs, current, out)
+            current = out
+        if bilevel_idx:
             bw = tmp / "bw.pdf"
-            if binarize_pages(ocr, bw, [left, right]) > 0:
+            if binarize_pages(current, bw, bilevel_idx) > 0:
                 current = bw
         final = tmp / "final.pdf"
         c.copy_annots(cut, current, final)
@@ -430,19 +428,34 @@ def resplit_original(src, orig, k, left, right, cut_x, langs, jobs="4", progress
         shutil.move(str(final), str(src))
         c.LOG_DIR.mkdir(parents=True, exist_ok=True)
         with open(LOG_PATH, "a", encoding="utf-8") as log:
-            log.write(f"{datetime.datetime.now():%Y-%m-%d %H:%M} RESPLIT {src} | pages {pages} | "
-                      f"from {orig.name} p{k + 1} | cut {cut_x:.1f}pt | {lang} | backup {bk}\n")
+            stamp = f"{datetime.datetime.now():%Y-%m-%d %H:%M}"
+            for e in edits:
+                origin = f"from {Path(orig).name} p{e['k'] + 1}" if orig is not None else "joined"
+                log.write(f"{stamp} RESPLIT {src} | pages {e['left'] + 1}-{e['right'] + 1} | {origin} | "
+                          f"cut {e['cut_x']:.1f}pt | {'+'.join(e['langs'])} | backup {bk}\n")
         return bk
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def resplit(src, n, cut_x, langs, jobs="4", progress=print, dy=0.0):
+    """1か所だけ切り直す（くっつけて切り直す場合）"""
+    return resplit_many(src, [{"left": n, "right": n + 1, "cut_x": cut_x, "langs": langs, "dy": dy}],
+                        None, jobs, progress)
+
+
+def resplit_original(src, orig, k, left, right, cut_x, langs, jobs="4", progress=print):
+    """1か所だけ切り直す（元のスキャンから切り直す場合）"""
+    return resplit_many(src, [{"k": k, "left": left, "right": right, "cut_x": cut_x, "langs": langs}],
+                        Path(orig), jobs, progress)
 
 
 def render_page(path, index, height_px):
     """1ページを画像にする。戻り値: (PIL画像, ポイント→ピクセルの倍率)"""
     from PIL import Image
     with pikepdf.open(path) as pdf:
-        x0, y0, x1, y1 = page_box(pdf.pages[index])
-    dpi = max(20, min(150, height_px / ((y1 - y0) / 72)))
+        _, wd, hd = sp.display_transform(pdf.pages[index])   # 回転指定を反映した見た目の大きさ
+    dpi = max(20, min(150, height_px / (hd / 72)))
     tmp = Path(tempfile.mkdtemp(prefix="eurocr_prev_"))
     try:
         png = tmp / "p.png"
@@ -451,7 +464,7 @@ def render_page(path, index, height_px):
                         f"-dLastPage={index + 1}", f"-sOutputFile={png}", str(path)],
                        capture_output=True, timeout=120)
         im = Image.open(png).convert("RGB")
-        return im, im.width / (x1 - x0)
+        return im, im.width / wd
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -476,7 +489,8 @@ def run_gui(src):
     root.title(f"EuroOCR-Resplit — {src.name}")
     state = {"orig": None, "map": None, "pair": None, "scale": 1.0, "old_cut": 0.0,
              "cut_px": None, "busy": False, "photo": None, "width_pt": 0.0,
-             "dy": 0.0, "auto_dy": 0.0, "parts": None, "ratio": 1.0}
+             "dy": 0.0, "auto_dy": 0.0, "parts": None, "ratio": 1.0,
+             "queue": {}}     # 切り直しの予定 {左ページの番号(0始まり): 予定}
 
     top = tk.Frame(root, padx=10, pady=6)
     top.pack(fill="x")
@@ -495,10 +509,12 @@ def run_gui(src):
     source_label = tk.Label(root, text="", padx=10, anchor="w", justify="left", fg="#444444")
     source_label.pack(fill="x")
 
-    help_text = T("画像をクリックして切る位置を選びます（← → で微調整、shift で大きく）。"
-                  "赤い線が新しい切れ目、青い点線が今の切れ目です。",
-                  "Click the image to choose the cut (← → to fine-tune, with shift for bigger steps). "
-                  "Red: new cut. Blue dotted: current cut.")
+    help_text = T("画像をクリックして切る位置を選びます。赤い線が新しい切れ目、青い点線が今の切れ目です。\n"
+                  "← → で前後の見開きへ（引いた切れ目は自動で予定に入ります）。option＋← → で切れ目の微調整"
+                  "（shift も押すと大きく）。delete でこの見開きの取り消し。",
+                  "Click the image to choose the cut. Red: new cut. Blue dotted: current cut.\n"
+                  "← → move to the previous/next spread (the cut you drew is added to the plan automatically). "
+                  "option+← → fine-tune the cut (with shift for bigger steps). delete cancels this spread.")
     tk.Label(root, text=help_text, padx=10, anchor="w", justify="left").pack(fill="x")
 
     canvas = tk.Canvas(root, bg="#888888", highlightthickness=0, cursor="crosshair")
@@ -516,15 +532,31 @@ def run_gui(src):
         tk.Checkbutton(boxes, text=f"{c.lang_name(code)} ({code})", variable=v).grid(
             row=k // 4, column=k % 4, sticky="w", padx=4)
 
+    qframe = tk.Frame(root, padx=10, pady=4)
+    qframe.pack(fill="x")
+    qleft = tk.Frame(qframe)
+    qleft.pack(side="left", fill="x", expand=True)
+    tk.Label(qleft, text=T("切り直す予定:", "Planned re-splits:"), anchor="w").pack(fill="x")
+    qlist = tk.Listbox(qleft, height=4, activestyle="none")
+    qlist.pack(fill="x", expand=True)
+    qbtns = tk.Frame(qframe)
+    qbtns.pack(side="left", padx=8)
+    btn_add = tk.Button(qbtns, text=T("予定に加える", "Add to plan"))
+    btn_add.pack(fill="x", pady=2)
+    btn_undo = tk.Button(qbtns, text=T("この見開きの取り消し（delete）", "Cancel this spread (delete)"))
+    btn_undo.pack(fill="x", pady=2)
+    btn_del = tk.Button(qbtns, text=T("選んだ予定を外す", "Remove selected"))
+    btn_del.pack(fill="x", pady=2)
+
     bottom = tk.Frame(root, padx=10, pady=8)
     bottom.pack(fill="x")
     status = tk.Label(bottom, text="", anchor="w", fg="#333333", justify="left")
     status.pack(side="left", fill="x", expand=True)
-    btn_close = tk.Button(bottom, text=T("閉じる", "Close"), command=root.destroy)
+    btn_close = tk.Button(bottom, text=T("閉じる", "Close"))
     btn_close.pack(side="right", padx=4)
-    btn_go = tk.Button(bottom, text=T("切り直して読み直す（上書き保存）", "Re-split and re-OCR (overwrite)"))
+    btn_go = tk.Button(bottom, text=T("予定をまとめて切り直す（上書き保存）", "Re-split all planned (overwrite)"))
     btn_go.pack(side="right", padx=4)
-    all_buttons = (btn_go, btn_prev, btn_next, btn_show, btn_close, btn_orig)
+    all_buttons = (btn_go, btn_prev, btn_next, btn_show, btn_close, btn_orig, btn_add, btn_del, btn_undo)
 
     def set_status(text):
         status.config(text=text)
@@ -561,8 +593,11 @@ def run_gui(src):
             canvas.create_line(x, 0, x, h, fill="#ff2020", width=2, tags="line")
 
     def show(page_no=None):
-        """page_no（1始まり）のページを含む見開きを表示する"""
+        """page_no（1始まり）のページを含む見開きを表示する。
+        その前に、表示中の見開きで引いた切れ目を自動で予定に入れる"""
         if state["busy"]:
+            return
+        if not commit_current():
             return
         try:
             page_no = int(page_var.get()) if page_no is None else page_no
@@ -596,6 +631,8 @@ def run_gui(src):
             left_im, right_im, scale, old_cut = render_parts(src, n, height)
             # 左右を別々に傾き補正したときの、つなぎ目の段差を測って合わせる
             state["dy"] = state["auto_dy"] = seam_offset(src, n)
+            if n in state["queue"]:
+                state["dy"] = state["queue"][n].get("dy", state["dy"])
             state["parts"] = (left_im, right_im, scale, old_cut)
             img = compose(left_im, right_im, scale, old_cut, state["dy"])
             width_pt = img.width / scale
@@ -607,17 +644,26 @@ def run_gui(src):
         state.update(pair=(k, left, right), scale=scale, old_cut=old_cut, cut_px=None,
                      width_pt=width_pt, ratio=ratio)
         page_var.set(str(page_no))
+        planned = state["queue"].get(left)
+        if planned:
+            state["cut_px"] = planned["cut_x"] * scale
         put_image(img)
         for v in lang_vars.values():
             v.set(False)
-        for code in guess_langs(src, left):
+        for code in (planned["langs"] if planned else guess_langs(src, left)):
             lang_vars[code].set(True)
         set_status(page_hint())
 
     def page_hint():
         k, left, right = state["pair"]
-        text = T(f"{left + 1}〜{right + 1}ページ。切る位置をクリックしてください。",
-                 f"Pages {left + 1}–{right + 1}. Click where to cut.")
+        if left in state["queue"]:
+            text = T(f"{left + 1}〜{right + 1}ページ（予定に入っています。クリックし直せば直せます。delete で取り消し）。",
+                     f"Pages {left + 1}–{right + 1} (planned; click again to change, delete to cancel).")
+        else:
+            text = T(f"{left + 1}〜{right + 1}ページ。切り直すなら切る位置をクリックしてください。"
+                     "そのまま ← → で移れば、この見開きはそのままです。",
+                     f"Pages {left + 1}–{right + 1}. Click where to cut if needed, "
+                     "or move on with ← → to leave this spread as it is.")
         if state.get("parts"):
             if abs(state["dy"] - state.get("auto_dy", 0.0)) < 0.01:
                 text += T(f"\nつなぎ目の段差を自動で合わせました（右ページを {state['dy']:+.1f} pt）。",
@@ -659,6 +705,14 @@ def run_gui(src):
         show(max(1, left + 1 - 1) if delta < 0 else min(npages, right + 2))
 
     def choose_original():
+        if state["queue"]:
+            if not messagebox.askokcancel("EuroOCR", T(
+                    "元のファイルを選び直すと、今の予定は捨てられます。続けますか？",
+                    "Choosing another original discards the current plan. Continue?")):
+                return
+            state["queue"].clear()
+            refresh_list()
+        state["cut_px"] = None
         path = filedialog.askopenfilename(title=T("元の見開きのPDFを選んでください", "Choose the original spread PDF"),
                                           filetypes=[("PDF", "*.pdf")], initialdir=str(src.parent))
         if path:
@@ -671,34 +725,140 @@ def run_gui(src):
         state["cut_px"] = max(1, min(int(canvas.cget("width")) - 1, ev.x))
         draw_lines()
         canvas.focus_set()
+        set_status(T("切れ目を選びました。ほかの見開きへ移ると自動で予定に入ります（delete で取り消し）。",
+                     "Cut chosen. It is added to the plan when you move to another spread (delete cancels)."))
 
-    def on_key(ev):
-        if state["cut_px"] is None or state["busy"]:
-            return
-        step_px = 5 if (ev.state & 0x1) else 1
+    def typing():
+        """ページ番号の欄などに入力中なら True（矢印キーは文字の移動に使う）"""
+        return isinstance(root.focus_get(), (tk.Entry, tk.Listbox))
+
+    def fine_tune(ev, step_px):
+        if typing() or state["cut_px"] is None or state["busy"]:
+            return "break"
         state["cut_px"] += -step_px if ev.keysym == "Left" else step_px
         draw_lines()
+        return "break"
+
+    def on_arrow(ev):
+        """← → で前後の見開きへ移る"""
+        if typing() or state["busy"]:
+            return
+        step(-1 if ev.keysym == "Left" else +1)
+        return "break"
+
+    def commit_current():
+        """表示中の見開きで引いた切れ目（と言語）を、予定に入れる。入れられなければ False"""
+        if state["pair"] is None or state["cut_px"] is None:
+            return True
+        left = state["pair"][1]
+        langs = [code for code, v in lang_vars.items() if v.get()]
+        e = state["queue"].get(left)
+        if (e and abs(e["cut_x"] - state["cut_px"] / state["scale"]) < 0.01 and e["langs"] == langs
+                and abs(e.get("dy", 0.0) - state.get("dy", 0.0)) < 0.01):
+            return True
+        return add_current(quiet=True) is True
+
+    def undo_current(_ev=None):
+        """表示中の見開きの予定と赤い線を取り消す"""
+        if state["busy"] or state["pair"] is None:
+            return
+        if _ev is not None and typing():
+            return
+        left = state["pair"][1]
+        state["queue"].pop(left, None)
+        state["cut_px"] = None
+        draw_lines()
+        refresh_list()
+        set_status(T("この見開きの切り直しを取り消しました。", "The re-split of this spread was cancelled."))
+        return "break"
+
+    def refresh_list():
+        qlist.delete(0, "end")
+        for left in sorted(state["queue"]):
+            e = state["queue"][left]
+            qlist.insert("end", T(
+                f"{e['left'] + 1}〜{e['right'] + 1}ページ：切れ目 {e['cut_x']:.0f} pt（今 {e['old_cut']:.0f} pt）・"
+                f"{'+'.join(e['langs'])}",
+                f"pages {e['left'] + 1}–{e['right'] + 1}: cut {e['cut_x']:.0f} pt (now {e['old_cut']:.0f} pt), "
+                f"{'+'.join(e['langs'])}"))
+        btn_go.config(text=T(f"予定をまとめて切り直す（{len(state['queue'])}か所・上書き保存）",
+                             f"Re-split all planned ({len(state['queue'])}, overwrite)"))
+
+    def add_current(quiet=False, from_go=False):
+        """表示中の見開きの切る位置と言語を、予定に加える（すでにあれば直す）。
+        戻り値: True＝加えた、False＝加えられない、None＝ほかの予定と重なるので加えなかった（from_go のとき）"""
+        if state["busy"] or state["pair"] is None:
+            return False
+        if state["cut_px"] is None:
+            if not quiet:
+                messagebox.showinfo("EuroOCR", T("先に画像をクリックして切る位置を選んでください。",
+                                                 "Click the image first to choose the cut."))
+            return False
+        langs = [code for code, v in lang_vars.items() if v.get()]
+        if not langs:
+            messagebox.showinfo("EuroOCR", T("言語を一つ以上選んでください。", "Choose at least one language."))
+            return False
+        k, left, right = state["pair"]
+        if state["orig"] is None:
+            # くっつけて切り直す場合、隣り合う2つの予定が同じページを含まないようにする
+            clash = [l for l in state["queue"] if l != left and abs(l - left) <= 1]
+            if clash and from_go:
+                return None
+            if clash:
+                messagebox.showwarning("EuroOCR", T(
+                    f"{clash[0] + 1}〜{clash[0] + 2}ページの予定と重なります。どちらかを外してください。",
+                    f"This overlaps the plan for pages {clash[0] + 1}–{clash[0] + 2}. Remove one of them."))
+                return False
+        state["queue"][left] = {"k": k, "left": left, "right": right,
+                                "cut_x": state["cut_px"] / state["scale"], "langs": langs,
+                                "dy": state.get("dy", 0.0), "old_cut": state["old_cut"]}
+        refresh_list()
+        set_status(page_hint())
+        return True
+
+    def remove_selected():
+        if state["busy"]:
+            return
+        keys = sorted(state["queue"])
+        for i in reversed(qlist.curselection()):
+            state["queue"].pop(keys[i], None)
+        refresh_list()
+
+    def on_select(_ev=None):
+        """一覧で選んだ予定の見開きを表示する"""
+        sel = qlist.curselection()
+        if sel and not state["busy"]:
+            show(sorted(state["queue"])[sel[0]] + 1)
 
     def go():
         if state["busy"]:
             return
-        if state["cut_px"] is None:
-            messagebox.showinfo("EuroOCR", T("先に画像をクリックして切る位置を選んでください。",
-                                             "Click the image first to choose the cut."))
+        # 表示中の見開きで線を引いたまま予定に加えていなければ、加える
+        if state["pair"] is not None and state["cut_px"] is not None:
+            left = state["pair"][1]
+            e = state["queue"].get(left)
+            if e is None or abs(e["cut_x"] - state["cut_px"] / state["scale"]) > 0.01:
+                added = add_current(quiet=True, from_go=True)
+                if added is False:
+                    return
+                if added is None:
+                    state["cut_px"] = None       # 重なる線は予定に入れず、すでにある予定だけを行う
+                    draw_lines()
+        if not state["queue"]:
+            messagebox.showinfo("EuroOCR", T("切り直す予定がありません。切る位置をクリックして「予定に加える」を押してください。",
+                                             "Nothing is planned. Click a cut and press “Add to plan”."))
             return
-        langs = [code for code, v in lang_vars.items() if v.get()]
-        if not langs:
-            messagebox.showinfo("EuroOCR", T("言語を一つ以上選んでください。", "Choose at least one language."))
-            return
+        n_plans = len(state["queue"])
         if not messagebox.askokcancel("EuroOCR", T(
-                "このファイルを上書き保存します。ほかのアプリで開いていて保存していない変更（付箋など）があれば、"
-                "先に保存してください。\n\n上書き前の版は ~/EuroOCR/backup に残ります。続けますか？",
-                "The file will be overwritten. If it is open in another app with unsaved changes "
-                "(notes etc.), save them first.\n\nThe previous version is kept in ~/EuroOCR/backup. Continue?")):
+                f"{n_plans}か所を切り直して、このファイルを上書き保存します。ほかのアプリで開いていて保存していない"
+                "変更（付箋など）があれば、先に保存してください。\n\n上書き前の版は ~/EuroOCR/backup に残ります。続けますか？",
+                f"{n_plans} spread(s) will be re-split and the file overwritten. If it is open in another app with "
+                "unsaved changes (notes etc.), save them first.\n\nThe previous version is kept in ~/EuroOCR/backup. "
+                "Continue?")):
             return
-        k, left, right = state["pair"]
-        cut_x = state["cut_px"] / state["scale"]
+        edits = [dict(e) for e in state["queue"].values()]
         orig = state["orig"]
+        current_left = state["pair"][1] if state["pair"] else 0
         state["busy"] = True
         for b in all_buttons:
             b.config(state="disabled")
@@ -707,12 +867,7 @@ def run_gui(src):
 
         def work():
             try:
-                if orig is not None:
-                    result["backup"] = resplit_original(src, orig, k, left, right, cut_x, langs,
-                                                        progress=messages.put)
-                else:
-                    result["backup"] = resplit(src, left, cut_x, langs, progress=messages.put,
-                                               dy=state.get("dy", 0.0))
+                result["backup"] = resplit_many(src, edits, orig, progress=messages.put)
             except Exception as e:
                 result["error"] = e
 
@@ -726,29 +881,58 @@ def run_gui(src):
             for b in all_buttons:
                 b.config(state="normal")
             if "error" in result:
-                set_status(T("失敗しました。", "Failed."))
+                set_status(T("失敗しました。予定はそのまま残っています。", "Failed. The plan is kept."))
                 messagebox.showerror("EuroOCR", str(result["error"]))
             else:
-                show(left + 1)
-                set_status(T(f"完了しました（{left + 1}〜{right + 1}ページ）。続けて別のページも直せます。",
-                             f"Done (pages {left + 1}–{right + 1}). You can fix another page."))
-                c.notify(T("切り直しが完了しました", "Re-split complete"))
+                state["queue"].clear()
+                state["cut_px"] = None
+                refresh_list()
+                show(current_left + 1)
+                set_status(T(f"完了しました（{n_plans}か所）。続けて別のページも直せます。",
+                             f"Done ({n_plans} spread(s)). You can fix more pages."))
+                c.notify(T(f"切り直しが完了しました（{n_plans}か所）", f"Re-split complete ({n_plans})"))
 
         th = threading.Thread(target=work, daemon=True)
         th.start()
         root.after(300, poll)
+
+    def close():
+        if state["busy"]:
+            return
+        if state["queue"] and not messagebox.askokcancel("EuroOCR", T(
+                f"まだ切り直していない予定が{len(state['queue'])}か所あります。予定を捨てて閉じますか？",
+                f"{len(state['queue'])} planned re-split(s) have not been done. Discard them and close?")):
+            return
+        root.destroy()
 
     btn_show.config(command=lambda: show())
     btn_prev.config(command=lambda: step(-1))
     btn_next.config(command=lambda: step(+1))
     btn_orig.config(command=choose_original)
     btn_go.config(command=go)
+    btn_add.config(command=add_current)
+    btn_del.config(command=remove_selected)
+    btn_close.config(command=close)
+    root.protocol("WM_DELETE_WINDOW", close)
+    qlist.bind("<Double-Button-1>", on_select)
     entry.bind("<Return>", lambda e: show())
     canvas.bind("<Button-1>", on_click)
-    for key in ("<Left>", "<Right>", "<Shift-Left>", "<Shift-Right>"):
-        canvas.bind(key, on_key)
+    btn_undo.config(command=undo_current)
+    root.bind_all("<Left>", on_arrow)
+    root.bind_all("<Right>", on_arrow)
+    # 微調整：Mac では option、ほかの環境では alt
+    for mod in ("Option", "Alt"):
+        try:
+            root.bind_all(f"<{mod}-Left>", lambda e: fine_tune(e, 1))
+            root.bind_all(f"<{mod}-Right>", lambda e: fine_tune(e, 1))
+            root.bind_all(f"<Shift-{mod}-Left>", lambda e: fine_tune(e, 5))
+            root.bind_all(f"<Shift-{mod}-Right>", lambda e: fine_tune(e, 5))
+        except tk.TclError:
+            pass
     for key in ("<Up>", "<Down>", "<Shift-Up>", "<Shift-Down>"):
-        canvas.bind(key, on_updown)
+        root.bind_all(key, lambda e: None if typing() else on_updown(e))
+    for key in ("<Delete>", "<BackSpace>"):
+        root.bind_all(key, undo_current)
 
     def show_first():
         """最初に切り直せる見開きを表示する"""
@@ -760,6 +944,7 @@ def run_gui(src):
         show(1)
 
     set_original(find_original(src))
+    refresh_list()
     root.after(100, show_first)
     root.lift()
     root.attributes("-topmost", True)

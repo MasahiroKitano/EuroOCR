@@ -45,11 +45,14 @@ EuroOCR は、新しい OCR エンジンではありません。文字の読み�
 
 #### 1. 「ダウンロード品」の印を外す
 
+Safari でダウンロードすると、zip が自動で展開され、展開済みのフォルダ（EuroOCR-1.0.1 など）がダウンロードフォルダにできます。そのとき zip そのものはゴミ箱に移されますが、問題はありません（Safari の「設定」→「一般」→「ダウンロード後、"安全な"ファイルを開く」による動きです）。
+
+
 インターネットから入手したアプリは、そのままでは開けません（Apple の署名がないため）。最初に一度だけ、次のどちらかを行ってください。
 
 **方法A（おすすめ）：ターミナルで一度に**
 
-「アプリケーション」→「ユーティリティ」→「ターミナル」を開き、次の一行を打ちます（最後に半角スペースを入れる）。続けて、このフォルダ（EuroOCR）をターミナルのウインドウにドラッグし、Return を押します。
+「アプリケーション」→「ユーティリティ」→「ターミナル」を開き、次の一行を打ちます（最後に半角スペースを入れる）。続けて、zip を展開してできたフォルダ（EuroOCR-1.0.1 など）をターミナルのウインドウにドラッグし、Return を押します。
 
 ```
 xattr -dr com.apple.quarantine 
@@ -86,7 +89,7 @@ xattr -dr com.apple.quarantine
 
 ### EuroOCR の動き
 
-- ページの半分以上が横長なら見開きとみなして左右に分割し、1ページ目が白紙なら削除します。
+- ページの半分以上が横長なら見開きとみなして左右に分割し、1ページ目が白紙なら削除します。コピー機のスキャンなどで、縦長の画像を回転指定で横長に見せているページも、見た目どおりの向きで分割します。
 - 文字層のないスキャンには、ノイズ除去（白黒画像の小さな点を消す）と傾き補正をかけます。
 - 5ページを試し読みして言語を判定します。自信がないときだけ確認画面が出ます（「全冊で確認」も選べます）。
 - 全冊の判定が済んでから、続けてOCRします。そこから先は操作不要です。終わると通知と音で知らせます。
@@ -99,7 +102,7 @@ xattr -dr com.apple.quarantine
 - **ギリシャ語を必ず加える**：試し読みでギリシャ文字が見つからなくても、古典ギリシャ語を加えて読む。ギリシャ語の引用がまばらな本に。
 - **強制OCR**：種類に関係なく、全ページを作り直して読み直す。元から文字がある電子版でギリシャ語が化けているものなどに（日本語中心の本は除く）。
 
-すでに OCR されていてギリシャ語が化けている本は、何も指定しなくても、種類に応じて読み直します（見えない文字の層は入れ替え、ClearScan や FineReader で読まれたものは作り直し）。
+すでに OCR されていてギリシャ語が化けている本は、何も指定しなくても、種類に応じて読み直します（見えない文字の層は入れ替え、ClearScan や FineReader で読まれたものは作り直し）。コピー機やスキャナーが画像の下に OCR の文字を敷いたスキャンも、作り直して読み直します。表紙など一部のページにだけ文字がある本は、そのページを残して、文字のないページだけを読み取ります。
 
 ### EuroOCR-Pages の指定
 
@@ -112,14 +115,17 @@ xattr -dr com.apple.quarantine
 ### EuroOCR-Resplit の使い方
 
 1. 文字が切れているページを含む「名前_OCR.pdf」を **EuroOCR-Resplit** にドロップします。窓が開きます。
-2. 「直したいページ」の欄にページ番号を入れて「表示」を押します。そのページを含む元の見開きが表示されます（「◀ 前の見開き」「次の見開き ▶」で移れます）。
-3. 青い点線が今の切れ目です。新しく切りたい位置（ノドの余白）をクリックすると赤い線が出ます。← → キーで微調整できます（shift を押しながらだと大きく動きます）。
-4. 読み直す言語を確かめ（2ページの今の文字から推定した言語に印が付いています）、「切り直して読み直す（上書き保存）」を押します。
-5. 終わると画像が新しい切れ目で表示し直されます。窓を開いたまま、続けて別のページも直せます。
+2. 「直したいページ」の欄にページ番号を入れて「表示」を押すと、そのページを含む元の見開きが表示されます。**← →** キー（または「◀ 前の見開き」「次の見開き ▶」）で前後の見開きへ移れます。
+3. 青い点線が今の切れ目です。切り直したい見開きでは、新しく切りたい位置（ノドの余白）をクリックすると赤い線が出ます。**option＋← →** で微調整できます（shift も押すと大きく動きます）。
+4. 読み直す言語を確かめます（2ページの今の文字から推定した言語に印が付いています）。
+5. そのまま ← → でほかの見開きへ移ると、引いた切れ目は自動で窓の下の「切り直す予定」の一覧に入ります（「予定に加える」で入れることもできます）。直す必要のない見開きは、何もせずに移れば変わりません。
+6. **delete** キー（または「この見開きの取り消し」）で、表示中の見開きの赤い線と予定を取り消せます。一覧から選んで「選んだ予定を外す」でも取り消せます。予定に入れた見開きをもう一度表示すると、その切れ目と言語が出ます。一覧の行をダブルクリックすると、その見開きを表示します。
+7. 最後に「予定をまとめて切り直す」を押すと、すべての予定をまとめて切り直し、読み直して、一度だけ上書き保存します。同じ言語の予定はまとめて読むので、1か所ずつ行うより速く済みます。終わった後も、窓を開いたまま続けて直せます。
 
 - 切り直しは、同じフォルダにある元のスキャン（「名前.pdf」）から行い、新しく切った2ページにノイズ除去・傾き補正・OCRをかけ直します。元のスキャンを移動・削除しないでください。別の場所にある場合は「元のファイルを選ぶ…」で指定できます。
 - 元のスキャンが見つからないときは、OCR済みの2ページをくっつけて切り直します。最初のOCRで左右のページを別々に傾き補正したため、つなぎ目で行が上下に食い違うことがありますが、この段差は自動で測って合わせます。はみ出した語の高さが行と合っていないときは、↑ ↓ キーで右ページを上下に動かして合わせてから切り直してください。
 - ファイルは上書き保存されます。上書き前の版は `~/EuroOCR/backup` に残ります（新しいものから30個）。
+- 実行していない予定があるまま窓を閉じようとすると、確認が出ます。
 - ほかのアプリで開いていて保存していない変更（付箋など）がある場合は、先に保存してください。
 - 付箋・ハイライトは位置に応じて左右のページに振り分け直します。
 - 切り直した2ページは、幅が左右で少し違うページになります。
@@ -146,6 +152,15 @@ Tesseract、OCRmyPDF、Ghostscript、pikepdf、OpenCV、Homebrew（EuroOCR-Setup
 - 見開きの分割は、ページの中央で切ります。スキャンのときに本の中心がずれていると、文字が切れることがあります。その場合は EuroOCR-Resplit で直せます。
 - 個人が作った道具を、無保証で公開しています。質問や不具合の報告は [Issues](https://github.com/MasahiroKitano/EuroOCR/issues) で受け付けますが、対応できるとは限りません。
 - macOS や Homebrew の更新によって、将来動かなくなる可能性があります。
+
+### 変更履歴
+
+- **1.0.1**：EuroOCR-Resplit で、複数の見開きの切り直しを予定としてためておき、最後にまとめて実行できるようにした。← → キーで見開きを移り、移るときに切れ目を自動で予定に入れ、delete キーで取り消せるようにした。回転指定のあるページ（コピー機のスキャンなど）も見開きとして分割するようにした。表紙など一部のページにだけ文字がある本を「電子版」と見誤らないようにした。コピー機・スキャナーの OCR の文字が画像の下に敷かれたスキャンを作り直すようにした。
+- **1.0.0**：最初の公開版。
+
+### 制作について
+
+EuroOCR は、北野雅弘が必要な機能と動作を考えて仕様を示し、Anthropic の AI アシスタント Claude がプログラムを書いて作りました。実際の本を使った試用と、その結果にもとづく修正の指示は北野が行いました。
 
 ### ライセンス
 
@@ -212,11 +227,14 @@ All of this happens by dropping a PDF onto an app.
 
 #### 1. Remove the download quarantine
 
+When downloaded with Safari, the zip is unzipped automatically and the unzipped folder (EuroOCR-1.0.1 or similar) appears in your Downloads folder, while the zip itself is moved to the Trash. This is normal (Safari → Settings → General → “Open ‘safe’ files after downloading”).
+
+
 Apps downloaded from the internet won’t open as-is (they are not signed by Apple). Do one of the following once.
 
 **Option A (recommended): all at once in Terminal**
 
-Open Applications → Utilities → Terminal and type the line below (with a trailing space). Then drag this EuroOCR folder into the Terminal window and press Return.
+Open Applications → Utilities → Terminal and type the line below (with a trailing space). Then drag the folder you got by unzipping (EuroOCR-1.0.1 or similar) into the Terminal window and press Return.
 
 ```
 xattr -dr com.apple.quarantine 
@@ -253,7 +271,7 @@ If you declined by mistake, turn Terminal on in System Settings → Privacy & Se
 
 ### How EuroOCR works
 
-- If at least half of the pages are landscape, the book is treated as two-page spreads and split; a blank first page is removed.
+- If at least half of the pages are landscape, the book is treated as two-page spreads and split; a blank first page is removed. Pages stored in portrait and shown in landscape through a rotation setting (as copiers often do) are split as they appear.
 - Scans without a text layer are despeckled (small dots in black-and-white images are removed) and deskewed.
 - Five pages are sampled to detect the languages; a dialog appears only when unsure (or for every book, if you choose).
 - OCR starts after all books are analyzed; no further input is needed. A notification sounds when done.
@@ -266,7 +284,7 @@ After dropping files, the first dialog offers these options (choose any, or none
 - **Always include Ancient Greek**: read with Ancient Greek even if no Greek letters are found in the sample pages. Useful for books with scattered Greek quotations.
 - **Forced OCR**: rebuild and re-read every page regardless of type, e.g. born-digital PDFs whose Greek is garbled (mainly-Japanese books are still skipped).
 
-Books that were already OCRed with garbled Greek are re-read without any option, according to their type (hidden text layers are replaced; ClearScan and FineReader output is rebuilt).
+Books that were already OCRed with garbled Greek are re-read without any option, according to their type (hidden text layers are replaced; ClearScan and FineReader output is rebuilt). Scans where a copier or scanner placed its OCR text under the image are rebuilt as well. If only a few pages (such as the cover) have text, those pages are kept and only the pages without text are read.
 
 ### Page spec for EuroOCR-Pages
 
@@ -279,14 +297,17 @@ Write “pages: languages”, separated by `;`. Pages look like `5`, `5-12` or `
 ### Using EuroOCR-Resplit
 
 1. Drop the “name_OCR.pdf” that has a badly split page onto **EuroOCR-Resplit**. A window opens.
-2. Enter the page number to fix and click “Show”. The original spread containing that page appears (“◀ Prev spread” / “Next spread ▶” move between spreads).
-3. The blue dotted line is the current cut. Click where the new cut should be (in the gutter margin); a red line appears. Fine-tune with ← → (hold shift for bigger steps).
-4. Check the languages (pre-selected from the current text of the two pages) and click “Re-split and re-OCR (overwrite)”.
-5. When done, the image is shown again with the new cut. You can keep the window open and fix other pages.
+2. Enter a page number and click “Show” to see the original spread containing that page. Use **← →** (or “◀ Prev spread” / “Next spread ▶”) to move between spreads.
+3. The blue dotted line is the current cut. On a spread you want to fix, click where the new cut should be (in the gutter margin); a red line appears. Fine-tune with **option+← →** (add shift for bigger steps).
+4. Check the languages (pre-selected from the current text of the two pages).
+5. When you move to another spread with ← →, the cut you drew is added automatically to the “Planned re-splits” list at the bottom (“Add to plan” also works). Spreads you leave untouched stay as they are.
+6. **delete** (or “Cancel this spread”) removes the red line and the plan for the spread shown. You can also select a plan in the list and click “Remove selected”. Showing a planned spread again brings back its cut and languages; double-click a line in the list to show that spread.
+7. Finally click “Re-split all planned” to re-cut and re-read all of them at once; the file is overwritten only once. Plans with the same languages are read together, so this is faster than one by one. Afterwards you can keep the window open and fix more pages.
 
 - The pages are re-cut from the original scan (“name.pdf”) in the same folder, and the two new pages are despeckled, deskewed and OCRed again. Do not move or delete the original scan; if it is elsewhere, use “Choose original…”.
 - If the original scan is not found, the two OCRed pages are joined and re-cut instead. Because the first OCR deskewed the two pages separately, lines may not meet at the seam; this step is measured and corrected automatically. If the cut-off words still do not line up, move the right page with ↑ ↓ before re-splitting.
 - The file is overwritten. The previous version is kept in `~/EuroOCR/backup` (the 30 most recent).
+- If you try to close the window with plans not yet carried out, you are asked to confirm.
 - If the file is open in another app with unsaved changes (notes etc.), save them first.
 - Notes and highlights are reassigned to the left or right page according to their position.
 - The two re-split pages will have slightly different widths.
@@ -313,6 +334,15 @@ Tesseract, OCRmyPDF, Ghostscript, pikepdf, OpenCV, Homebrew (installed on your M
 - Spreads are split at the middle of the page. If the book was off-center when scanned, text may be cut; EuroOCR-Resplit can fix such pages.
 - This is a personal tool published without warranty. Questions and bug reports are welcome on [Issues](https://github.com/MasahiroKitano/EuroOCR/issues), but may not always be answered.
 - Future macOS or Homebrew updates may stop it from working.
+
+### Changes
+
+- **1.0.1**: EuroOCR-Resplit can now collect several re-splits as a plan and carry them out together at the end; ← → move between spreads and add the drawn cut to the plan automatically, and delete cancels it. Pages with a rotation setting (e.g. copier scans) are now split as spreads. Books with text on only a few pages (such as the cover) are no longer mistaken for born-digital PDFs. Scans with copier/scanner OCR text placed under the image are now rebuilt.
+- **1.0.0**: First public release.
+
+### How this was made
+
+EuroOCR was built by Claude, Anthropic's AI assistant, which wrote the code from specifications by Masahiro Kitano. Kitano designed the features, tested the tools on real books and directed the corrections.
 
 ### License
 

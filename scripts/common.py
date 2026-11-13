@@ -130,6 +130,8 @@ CATEGORY = {
     "digital": ("電子版（元から文字） → 処理不要", "born-digital → nothing to do"),
     "japanese": ("日本語中心 → 処理しない", "mainly Japanese → skipped"),
     "forced": ("強制OCR → 全ページ作り直し", "forced OCR → rebuild all pages"),
+    "scanocr": ("文字入りスキャン（コピー機・スキャナーのOCR） → ノイズ除去・傾き補正・作り直し",
+                "scan with copier/scanner OCR text → clean, deskew, rebuild"),
     "finereader": ("FineReaderでOCR済み・ギリシャ語あり → 作り直し",
                    "FineReader OCR with Greek → rebuild"),
     "monotonic": ("ギリシャ語が現代ギリシャ語として認識済み → 作り直し",
@@ -180,6 +182,55 @@ def count_text(obj, resources, tr, depth, counts):
                 count_text(xobj, xobj.get(Name.Resources, resources), tr, depth + 1, counts)
 
 
+def _matmul(m, n):
+    a, b, c, d, e, f = m
+    a2, b2, c2, d2, e2, f2 = n
+    return (a * a2 + b * c2, a * b2 + b * d2, c * a2 + d * c2, c * b2 + d * d2,
+            e * a2 + f * c2 + e2, e * b2 + f * d2 + f2)
+
+
+def image_coverage(page):
+    """ページに描かれた画像のうち、いちばん大きいものがページの何割を覆うか（0〜1）"""
+    x0, y0, x1, y1 = (float(v) for v in page.obj.get(Name.CropBox, page.obj.MediaBox))
+    page_area = abs((x1 - x0) * (y1 - y0)) or 1.0
+    best = 0.0
+
+    def walk(obj, resources, ctm, depth):
+        nonlocal best
+        if depth > 4:
+            return
+        try:
+            ops = pikepdf.parse_content_stream(obj)
+        except Exception:
+            return
+        stack = []
+        for operands, op in ops:
+            o = str(op)
+            if o == "q":
+                stack.append(ctm)
+            elif o == "Q":
+                ctm = stack.pop() if stack else ctm
+            elif o == "cm" and len(operands) == 6:
+                try:
+                    ctm = _matmul(tuple(float(v) for v in operands), ctm)
+                except Exception:
+                    pass
+            elif o == "Do" and operands and resources is not None:
+                try:
+                    xobj = resources.XObject[operands[0]]
+                except Exception:
+                    continue
+                sub = xobj.get(Name.Subtype)
+                if sub == Name.Image:
+                    best = max(best, abs(ctm[0] * ctm[3] - ctm[1] * ctm[2]) / page_area)
+                elif sub == Name.Form:
+                    fm = tuple(float(v) for v in xobj.get(Name.Matrix, [1, 0, 0, 1, 0, 0]))
+                    walk(xobj, xobj.get(Name.Resources, resources), _matmul(fm, ctm), depth + 1)
+
+    walk(page.obj, page.obj.get(Name.Resources), (1.0, 0.0, 0.0, 1.0, 0.0, 0.0), 0)
+    return min(best, 1.0)
+
+
 def classify(pdf, sample_pages=24):
     n = len(pdf.pages)
     bits = set()
@@ -200,15 +251,33 @@ def classify(pdf, sample_pages=24):
     else:
         idx = sorted({int(i * (n - 1) / (sample_pages - 1)) for i in range(sample_pages)})
     counts = {"visible": 0, "invisible": 0}
+    full_image_pages = 0
+    text_pages = 0
     for i in idx:
         page = pdf.pages[i]
+        before = counts["visible"] + counts["invisible"]
         count_text(page.obj, page.obj.get(Name.Resources), 0, 0, counts)
+        if counts["visible"] + counts["invisible"] > before:
+            text_pages += 1
+        if image_coverage(page) >= 0.85:
+            full_image_pages += 1
+    # ほぼ全ページが「ページ全体を覆う画像」でできている＝スキャン
+    scan_like = full_image_pages >= len(idx) * 0.8
     visible, invisible = counts["visible"], counts["invisible"]
     total = visible + invisible
-    if total == 0:
+    if total == 0 or text_pages < len(idx) * 0.3:
+        # 文字のあるページがごく一部（表紙だけ Acrobat で OCR した、など）→ スキャンの本。
+        # 文字のあるページはそのまま残し、文字のないページだけを読み取る
         cat = "scan"
     elif visible > total * 0.2:
-        cat = "clearscan" if pages_with_bilevel >= n * 0.5 else "digital"
+        if pages_with_bilevel >= n * 0.5 and not scan_like:
+            cat = "clearscan"
+        elif scan_like:
+            # 見える文字があっても、ページ全体の画像の下に敷かれた OCR の文字
+            # （コピー機・スキャナー・Acrobat の文字入りスキャン）
+            cat = "scanocr"
+        else:
+            cat = "digital"
     else:
         cat = "redo"
     producer = str(pdf.docinfo.get("/Producer", "")) if pdf.docinfo else ""

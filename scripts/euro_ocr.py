@@ -143,18 +143,19 @@ def run_ocr(work, info, cat, lang, dst, jobs, clean, deskew):
         else:
             source = tmp / "clean.pdf"
             c.strip_annots(work, source)          # 注釈は最後に元から移植する
-            if cat == "scan" and clean and info["any_bilevel"]:
+            is_scan = cat in ("scan", "scanocr")
+            if is_scan and clean and info["any_bilevel"]:
                 cleaned, removed = c.despeckle_pdf(source, tmp / "despeckled.pdf", DESPECKLE_AREA)
                 source = tmp / "despeckled.pdf"
                 extra.append(T(f"ノイズ除去 {removed}点", f"despeckled {removed} dots"))
             ocr = tmp / "ocr.pdf"
             if cat == "scan":
                 args = ["--mode", "skip", "--optimize", "3"]
-                if deskew:
-                    args.append("--deskew")
-                    extra.append(T("傾き補正", "deskewed"))
-            else:  # ClearScan / FineReader / 現代ギリシャ語として認識済み
+            else:  # ClearScan / FineReader / 現代ギリシャ語として認識済み / 文字入りスキャン
                 args = ["--mode", "force", "--optimize", "3"]
+            if is_scan and deskew:
+                args.append("--deskew")
+                extra.append(T("傾き補正", "deskewed"))
             c.ocrmypdf(*args, *common, source, ocr)
             current = ocr
             # 元が白黒2値なら、白黒に戻して軽くする
